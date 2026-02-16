@@ -994,13 +994,15 @@ class DungeonScene: SKScene {
         let kA = heldKeys.contains(0) || heldKeys.contains(123)   // A / Left
         let kD = heldKeys.contains(2) || heldKeys.contains(124)   // D / Right
         let kJ = heldKeys.contains(38) || mouseDown                // J / Click
-        let kK = heldKeys.contains(40) || heldKeys.contains(56)   // K / Shift
 
-        // Jump: consume from keys (one-shot) to fill buffer
+        // Roll: one-shot from keys (like jump)
+        let rollPressed = keys.contains(40) || keys.contains(56)  // K / Shift
+        if rollPressed { keys.remove(40); keys.remove(56) }
+
+        // Jump: one-shot from keys
         let jumpPressed = keys.contains(126) || keys.contains(13) || keys.contains(49)  // Up Arrow / W / Space
         if jumpPressed {
             pJumpBuf = JUMP_BUF
-            // Consume so it doesn't re-trigger next frame
             keys.remove(126); keys.remove(13); keys.remove(49)
         }
 
@@ -1020,8 +1022,8 @@ class DungeonScene: SKScene {
             if kD { dx += 1; pFacing = 1 }
             if pAtkT <= 0 { pVel.x = dx * effectiveMoveSPD }
 
-            // Roll trigger
-            if kK && pGround && dx != 0 && pRollT <= -0.3 {
+            // Roll trigger: just press K/Shift, rolls in facing direction, works on ground or air
+            if rollPressed && pRollT <= -0.1 {
                 pRollT = effectiveRollDUR; pRollDir = pFacing
             }
         }
