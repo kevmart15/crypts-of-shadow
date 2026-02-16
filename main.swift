@@ -310,6 +310,22 @@ class Tex {
         img.unlockFocus()
         return SKTexture(image: img)
     }()
+    // ── Roll frames (2-frame tumble) ──
+    lazy var playerRoll2: SKTexture = {
+        sprite(18, 14) { c in
+            f(c, 2, 3, 14, 9, OL)
+            f(c, 3, 4, 12, 7, C2); f(c, 4, 5, 10, 5, C1)
+            f(c, 5, 6, 8, 3, A2); f(c, 6, 7, 6, 1, A3)
+            px(c, 4, 6, EG); px(c, 5, 6, EG)
+        }
+    }()
+
+    // ── Bone projectile ──
+    lazy var boneTex: SKTexture = sprite(8, 4) { c in
+        f(c, 0, 1, 8, 2, BO); f(c, 1, 0, 2, 4, BN); f(c, 5, 0, 2, 4, BN)
+        px(c, 3, 2, BN); px(c, 4, 2, BN)
+    }
+
     lazy var healthOrb: SKTexture = sprite(8, 8) { c in
         f(c, 1, 1, 6, 6, rgb(35,160,60)); f(c, 2, 2, 4, 4, rgb(55,210,85))
         f(c, 3, 3, 2, 2, rgb(120,255,150)); px(c, 4, 5, rgb(200,255,210))
@@ -519,6 +535,7 @@ class DungeonScene: SKScene {
     var fgOverlay: SKNode!  // foreground tiles that render OVER the player
     var enemies: [Enemy] = []
     var healthOrbs: [SKSpriteNode] = []
+    var projectiles: [(node: SKSpriteNode, vel: CGPoint, life: CGFloat)] = []
     var torchNodes: [(SKSpriteNode, SKSpriteNode)] = [] // (torch, glow)
     var dustParticles: [SKShapeNode] = []
     var vignette: SKSpriteNode!
@@ -668,6 +685,7 @@ class DungeonScene: SKScene {
         fgOverlay.removeAllChildren()
         for e in enemies { e.node.removeFromParent() }; enemies.removeAll()
         for h in healthOrbs { h.removeFromParent() }; healthOrbs.removeAll()
+        for p in projectiles { p.node.removeFromParent() }; projectiles.removeAll()
         torchNodes.removeAll(); dustParticles.removeAll()
 
         let (t, spawn, exit, spawns, torchs) = generateLevel(fl)
@@ -978,6 +996,7 @@ class DungeonScene: SKScene {
 
         updatePlayer(dt)
         updateEnemies(dt)
+        updateProjectiles(dt)
         checkCombat()
         checkExit()
         updateOrbs(dt)
@@ -1014,7 +1033,7 @@ class DungeonScene: SKScene {
         if pRollT > 0 {
             pRollT -= dt
             pVel.x = pRollDir * effectiveRollSPD
-            pInv = 0.1
+            pInv = 0.25  // fully invincible during roll + 0.25s after
         } else {
             // Movement
             var dx: CGFloat = 0
@@ -1103,7 +1122,23 @@ class DungeonScene: SKScene {
     func updatePlayerAnim() {
         let tex = Tex.shared
         if pRollT > 0 {
-            pNode.texture = tex.playerRoll
+            // Two-frame roll animation + spin
+            let rollPct = 1 - (pRollT / (ROLL_DUR * (1 + (rollMult - 1) * 0.5)))
+            pNode.texture = rollPct < 0.5 ? tex.playerRoll : tex.playerRoll2
+            pNode.zRotation = pRollDir * rollPct * .pi * 2  // full spin
+            // Dust trail particles
+            if Int(elapsed * 30) % 3 == 0 {
+                let d = SKShapeNode(circleOfRadius: CGFloat.random(in: 2...4))
+                d.fillColor = NSColor(white: 0.4, alpha: 0.5); d.strokeColor = .clear
+                d.position = CGPoint(x: pPos.x - pRollDir * 10, y: pPos.y + 4)
+                d.zPosition = 9
+                levelNode.addChild(d)
+                d.run(SKAction.sequence([
+                    SKAction.group([SKAction.fadeAlpha(to: 0, duration: 0.3),
+                                    SKAction.scale(to: 0.2, duration: 0.3),
+                                    SKAction.moveBy(x: -pRollDir * 15, y: 10, duration: 0.3)]),
+                    SKAction.removeFromParent()]))
+            }
         } else if pAtkT > 0 {
             let idx = min(pAtkPhase, tex.playerAttack.count - 1)
             pNode.texture = tex.playerAttack[idx]
@@ -1117,9 +1152,15 @@ class DungeonScene: SKScene {
         } else {
             pNode.texture = tex.playerIdle[0]
         }
+        if pRollT <= 0 { pNode.zRotation = 0 }  // reset rotation after roll
         pNode.xScale = pFacing * S
         pNode.yScale = S
-        pNode.alpha = (pInv > 0 && sin(elapsed * 20) > 0) ? 0.3 : 1
+        // Flash during invincibility, but stay visible during roll
+        if pRollT > 0 {
+            pNode.alpha = 0.8
+        } else {
+            pNode.alpha = (pInv > 0 && sin(elapsed * 20) > 0) ? 0.3 : 1
+        }
     }
 
     // ── Tile Collision ──
@@ -1226,21 +1267,32 @@ class DungeonScene: SKScene {
                 let frame = Int(elapsed * 3) % tex.zombieWalk.count
                 e.node.texture = (e.attackCD > 0.8) ? tex.zombieAttack : tex.zombieWalk[frame]
 
-            case 1: // Skeleton
-                if dist < 650 {
-                    e.vel.x = (dx > 0 ? 1 : -1) * 100; e.facing = dx > 0 ? 1 : -1
+            case 1: // Skeleton — ranged bone thrower
+                if dist < 500 {
+                    // Keep distance: back away if too close, approach if too far
+                    if dist < 150 {
+                        e.vel.x = (dx > 0 ? -1 : 1) * 80; e.facing = dx > 0 ? 1 : -1
+                    } else if dist > 350 {
+                        e.vel.x = (dx > 0 ? 1 : -1) * 80; e.facing = dx > 0 ? 1 : -1
+                    } else {
+                        e.vel.x *= 0.8; e.facing = dx > 0 ? 1 : -1
+                    }
+                    // Throw bone projectile
+                    if e.attackCD <= 0 && dist < 450 {
+                        e.attackCD = 1.8
+                        spawnBoneProjectile(from: e.pos, toward: pPos)
+                    }
                 } else {
                     let drift = e.pos.x - e.startX
                     if abs(drift) > 200 { e.vel.x = drift > 0 ? -60 : 60 }
                     else if abs(e.vel.x) < 10 { e.vel.x = Bool.random() ? 60 : -60 }
                     e.facing = e.vel.x > 0 ? 1 : -1
                 }
-                if dist < 70 && e.attackCD <= 0 { e.attackCD = 0.9; damagePlayer(1, from: e.pos) }
                 e.vel.y += GRAVITY * dt
                 e.pos.x += e.vel.x * dt; e.pos.y += e.vel.y * dt
                 resolveEnemyX(e); resolveEnemyY(e)
                 let frame = Int(elapsed * 4) % tex.skeletonWalk.count
-                e.node.texture = (e.attackCD > 0.5) ? tex.skeletonAttack : tex.skeletonWalk[frame]
+                e.node.texture = (e.attackCD > 1.3) ? tex.skeletonAttack : tex.skeletonWalk[frame]
 
             case 2: // Bat
                 e.sineT += dt * 3
@@ -1404,6 +1456,57 @@ class DungeonScene: SKScene {
             }
         }
         for i in toRemove.reversed() { healthOrbs.remove(at: i) }
+    }
+
+    // ── Bone Projectiles ──
+    func spawnBoneProjectile(from pos: CGPoint, toward target: CGPoint) {
+        let bone = SKSpriteNode(texture: Tex.shared.boneTex)
+        bone.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        bone.setScale(S); bone.position = CGPoint(x: pos.x, y: pos.y + 35)
+        bone.zPosition = 8
+        levelNode.addChild(bone)
+        let dx = target.x - pos.x
+        let dy = (target.y + 25) - (pos.y + 35)
+        let d = sqrt(dx*dx + dy*dy)
+        let spd: CGFloat = 320
+        let vx = (dx / max(d, 1)) * spd
+        let vy = (dy / max(d, 1)) * spd
+        bone.zRotation = atan2(dy, dx)
+        projectiles.append((node: bone, vel: CGPoint(x: vx, y: vy), life: 2.5))
+    }
+
+    func updateProjectiles(_ dt: CGFloat) {
+        var toRemove: [Int] = []
+        for i in 0..<projectiles.count {
+            projectiles[i].life -= dt
+            projectiles[i].node.position.x += projectiles[i].vel.x * dt
+            projectiles[i].node.position.y += projectiles[i].vel.y * dt
+            // Spin the bone
+            projectiles[i].node.zRotation += 12 * dt
+
+            let p = projectiles[i].node.position
+            // Hit player?
+            let dx = p.x - pPos.x
+            let dy = p.y - (pPos.y + PH/2)
+            if sqrt(dx*dx + dy*dy) < 28 {
+                damagePlayer(1, from: p)
+                toRemove.append(i)
+                continue
+            }
+            // Hit wall?
+            if isSolid(p.x, p.y) {
+                toRemove.append(i)
+                continue
+            }
+            // Expired?
+            if projectiles[i].life <= 0 {
+                toRemove.append(i)
+            }
+        }
+        for i in toRemove.reversed() {
+            projectiles[i].node.removeFromParent()
+            projectiles.remove(at: i)
+        }
     }
 
     func checkExit() {
